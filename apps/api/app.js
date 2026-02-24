@@ -292,7 +292,28 @@ app.post("/appointments", requireAuth, async (req, res) => {
     return res.status(500).json({ message: String(e) });
   }
 });
+// Cancelar cita (status = cancelled)
+app.patch("/appointments/:id/cancel", requireAuth, async (req, res) => {
+  try {
+    const ownerId = req.user.id;
+    const id = req.params.id;
 
+    const { data, error } = await supabase
+      .from("appointments")
+      .update({ status: "cancelled" })
+      .eq("id", id)
+      .eq("owner_id", ownerId) // seguridad: solo la suya
+      .select()
+      .single();
+
+    if (error) return res.status(400).json({ message: error.message });
+    if (!data) return res.status(404).json({ message: "Cita no encontrada" });
+
+    return res.json({ ok: true, appointment: data });
+  } catch (e) {
+    return res.status(500).json({ message: String(e) });
+  }
+});
 // VISITS
 app.get("/pets/:petId/visits", requireAuth, async (req, res) => {
   try {
