@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
@@ -13,6 +13,7 @@ import {
 import { LinearGradient } from "expo-linear-gradient";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { API_URL } from "../../src/config";
+import { useFocusEffect } from "@react-navigation/native";
 
 type Pet = {
   id: string;
@@ -38,8 +39,23 @@ export default function Pets() {
   const [pets, setPets] = useState<Pet[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // modal
+  // modal crear mascota
   const [open, setOpen] = useState(false);
+
+  // ✅ modal tratamientos
+  const [treatmentsOpen, setTreatmentsOpen] = useState(false);
+
+  // lista tratamientos (solo UI)
+  const TREATMENTS = [
+    { title: "Vacunación", desc: "Vacunas según edad y calendario." },
+    { title: "Desparasitación", desc: "Interna y externa." },
+    { title: "Consulta general", desc: "Revisión completa y diagnóstico." },
+    { title: "Emergencias", desc: "Atención prioritaria." },
+    { title: "Cirugía", desc: "Procedimientos programados." },
+    { title: "Limpieza dental", desc: "Profilaxis y cuidado dental." },
+    { title: "Laboratorio", desc: "Exámenes y pruebas." },
+    { title: "Grooming", desc: "Baño, corte y limpieza." },
+  ];
 
   // form
   const [name, setName] = useState("");
@@ -57,15 +73,25 @@ export default function Pets() {
   }
 
   async function loadPets() {
+    setLoading(true);
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 12000); // 12s
+
     try {
-      setLoading(true);
       const token = await AsyncStorage.getItem("token");
-      if (!token) return;
-  
+      if (!token) {
+        // IMPORTANTE: apaga loading igual
+        setPets([]);
+        Alert.alert("Sesión", "No hay token. Cierra sesión e inicia de nuevo.");
+        return;
+      }
+
       const res = await fetch(`${API_URL}/pets`, {
         headers: { Authorization: `Bearer ${token}` },
+        signal: controller.signal,
       });
-  
+
       const raw = await res.text();
       let data: any = null;
       try {
@@ -73,7 +99,7 @@ export default function Pets() {
       } catch {
         data = raw; // puede ser HTML o texto
       }
-  
+
       if (!res.ok) {
         const msg =
           typeof data === "string"
@@ -81,15 +107,23 @@ export default function Pets() {
             : typeof data?.message === "string"
             ? data.message
             : JSON.stringify(data, null, 2);
-  
-        Alert.alert("Error /pets", msg.slice(0, 1200));
+
+        Alert.alert("Error /pets", (msg || `HTTP ${res.status}`).slice(0, 1200));
         return;
       }
-  
+
       setPets(data.pets ?? []);
     } catch (e: any) {
-      Alert.alert("Error", e?.message ? String(e.message) : JSON.stringify(e, null, 2));
+      const msg =
+        e?.name === "AbortError"
+          ? "La API tardó demasiado (timeout). Intenta de nuevo."
+          : e?.message
+          ? String(e.message)
+          : extractErrorMessage(e);
+
+      Alert.alert("Error", msg);
     } finally {
+      clearTimeout(timeout);
       setLoading(false);
     }
   }
@@ -97,18 +131,21 @@ export default function Pets() {
   async function createPet() {
     const n = name.trim();
     const s = species.trim();
-  
+
     if (!n) return Alert.alert("Revisa", "Falta el nombre.");
     if (!s) return Alert.alert("Revisa", "Falta la especie. (perro/gato/etc)");
-  
+
     if (birthdate.trim() && !/^\d{4}-\d{2}-\d{2}$/.test(birthdate.trim())) {
-      return Alert.alert("Revisa", "Birthdate debe ser YYYY-MM-DD (ej: 2022-05-10)");
+      return Alert.alert(
+        "Revisa",
+        "Birthdate debe ser YYYY-MM-DD (ej: 2022-05-10)"
+      );
     }
-  
+
     try {
       const token = await AsyncStorage.getItem("token");
       if (!token) return Alert.alert("Error", "No hay sesión.");
-  
+
       const res = await fetch(`${API_URL}/pets`, {
         method: "POST",
         headers: {
@@ -123,7 +160,7 @@ export default function Pets() {
           notes: notes.trim() || null,
         }),
       });
-  
+
       const raw = await res.text();
       let data: any = null;
       try {
@@ -131,7 +168,7 @@ export default function Pets() {
       } catch {
         data = raw;
       }
-  
+
       if (!res.ok) {
         const msg =
           typeof data === "string"
@@ -139,24 +176,63 @@ export default function Pets() {
             : typeof data?.message === "string"
             ? data.message
             : JSON.stringify(data, null, 2);
-  
-        Alert.alert("Error POST /pets", msg.slice(0, 1200));
+
+        Alert.alert(
+          "Error POST /pets",
+          (msg || `HTTP ${res.status}`).slice(0, 1200)
+        );
         return;
       }
-  
+
       setOpen(false);
       resetForm();
       await loadPets();
     } catch (e: any) {
-      Alert.alert("Error", e?.message ? String(e.message) : JSON.stringify(e, null, 2));
+      Alert.alert(
+        "Error",
+        e?.message ? String(e.message) : extractErrorMessage(e)
+      );
     }
   }
+
+  // ✅ CLAVE: recargar cada vez que entras a la pestaña
+  useFocusEffect(
+    useCallback(() => {
+      loadPets();
+    }, [])
+  );
+
   return (
     <LinearGradient colors={["#2E78FF", "#66A6FF"]} style={{ flex: 1 }}>
       <SafeAreaView style={{ flex: 1, padding: 18 }}>
-        <Text style={{ color: "white", fontSize: 26, fontWeight: "900" }}>
-          Mis Mascotas 🐾
-        </Text>
+        {/* Header con botón Tratamientos */}
+        <View
+          style={{
+            flexDirection: "row",
+            alignItems: "center",
+            justifyContent: "space-between",
+          }}
+        >
+          <Text style={{ color: "white", fontSize: 26, fontWeight: "900" }}>
+            Mis Mascotas 🐾
+          </Text>
+
+          <TouchableOpacity
+            onPress={() => setTreatmentsOpen(true)}
+            style={{
+              paddingVertical: 10,
+              paddingHorizontal: 14,
+              borderRadius: 999,
+              backgroundColor: "rgba(255,255,255,0.18)",
+              borderWidth: 1,
+              borderColor: "rgba(255,255,255,0.25)",
+            }}
+          >
+            <Text style={{ color: "white", fontWeight: "900" }}>
+              Tratamientos
+            </Text>
+          </TouchableOpacity>
+        </View>
 
         <View style={{ height: 16 }} />
 
@@ -179,7 +255,9 @@ export default function Pets() {
                   elevation: 4,
                 }}
               >
-                <Text style={{ fontSize: 18, fontWeight: "900" }}>{item.name}</Text>
+                <Text style={{ fontSize: 18, fontWeight: "900" }}>
+                  {item.name}
+                </Text>
                 <Text style={{ color: "#555", marginTop: 4 }}>
                   {item.species}
                   {item.breed ? ` • ${item.breed}` : ""}
@@ -205,7 +283,7 @@ export default function Pets() {
           />
         )}
 
-        {/* Floating Button */}
+        {/* Floating Button (+) */}
         <TouchableOpacity
           onPress={() => setOpen(true)}
           style={{
@@ -224,7 +302,14 @@ export default function Pets() {
             elevation: 8,
           }}
         >
-          <Text style={{ color: "white", fontSize: 30, fontWeight: "900", marginTop: -2 }}>
+          <Text
+            style={{
+              color: "white",
+              fontSize: 30,
+              fontWeight: "900",
+              marginTop: -2,
+            }}
+          >
             +
           </Text>
         </TouchableOpacity>
@@ -297,7 +382,9 @@ export default function Pets() {
                 }}
               />
 
-              <Text style={{ fontWeight: "700" }}>Nacimiento (YYYY-MM-DD)</Text>
+              <Text style={{ fontWeight: "700" }}>
+                Nacimiento (YYYY-MM-DD)
+              </Text>
               <TextInput
                 value={birthdate}
                 onChangeText={setBirthdate}
@@ -361,6 +448,83 @@ export default function Pets() {
                   </Text>
                 </TouchableOpacity>
               </View>
+            </View>
+          </View>
+        </Modal>
+
+        {/* ✅ Modal Tratamientos (sale desde arriba) */}
+        <Modal visible={treatmentsOpen} transparent animationType="slide">
+          <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.55)" }}>
+            {/* tocar afuera cierra */}
+            <TouchableOpacity
+              activeOpacity={1}
+              onPress={() => setTreatmentsOpen(false)}
+              style={{ flex: 1 }}
+            />
+
+            <View
+              style={{
+                position: "absolute",
+                top: 0,
+                left: 0,
+                right: 0,
+                paddingTop: 52,
+                paddingBottom: 14,
+                paddingHorizontal: 16,
+                backgroundColor: "white",
+                borderBottomLeftRadius: 22,
+                borderBottomRightRadius: 22,
+                shadowColor: "#000",
+                shadowOpacity: 0.2,
+                shadowRadius: 12,
+                elevation: 10,
+              }}
+            >
+              <View
+                style={{
+                  flexDirection: "row",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                }}
+              >
+                <Text style={{ fontSize: 18, fontWeight: "900" }}>
+                  Tratamientos disponibles
+                </Text>
+
+                <TouchableOpacity
+                  onPress={() => setTreatmentsOpen(false)}
+                  style={{
+                    paddingVertical: 8,
+                    paddingHorizontal: 12,
+                    borderRadius: 999,
+                    backgroundColor: "#EEF2FF",
+                  }}
+                >
+                  <Text style={{ fontWeight: "900", color: "#1D4ED8" }}>
+                    Cerrar
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
+              <View style={{ height: 10 }} />
+
+              {TREATMENTS.map((t) => (
+                <View
+                  key={t.title}
+                  style={{
+                    paddingVertical: 10,
+                    borderBottomWidth: 1,
+                    borderBottomColor: "#F1F5F9",
+                  }}
+                >
+                  <Text style={{ fontWeight: "900", fontSize: 15 }}>
+                    {t.title}
+                  </Text>
+                  <Text style={{ color: "#475569", marginTop: 3 }}>
+                    {t.desc}
+                  </Text>
+                </View>
+              ))}
             </View>
           </View>
         </Modal>

@@ -163,6 +163,9 @@ export default function Index() {
       await AsyncStorage.setItem("token", data.access_token);
       await AsyncStorage.setItem("user_id", meUser.id);
       await AsyncStorage.setItem("user_email", meUser.email ?? email.trim());
+      
+
+      await AsyncStorage.setItem("session_start_ms", String(Date.now()));
 
       setToken(data.access_token);
       setUserId(meUser.id);
@@ -222,6 +225,7 @@ export default function Index() {
     await AsyncStorage.removeItem("token");
     await AsyncStorage.removeItem("user_id");
     await AsyncStorage.removeItem("user_email");
+    await AsyncStorage.removeItem("session_start_ms");
 
     setToken(null);
     setUserId("");

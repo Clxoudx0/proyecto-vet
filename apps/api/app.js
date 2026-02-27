@@ -43,8 +43,9 @@ async function requireAuth(req, res, next) {
 }
 
 // Asegurar que exista el profile para el usuario (evita FK error)
+// IMPORTANTE: usar supabaseAdmin para que NO falle por RLS
 async function ensureProfile(user) {
-  const { data: existing, error: selErr } = await supabase
+  const { data: existing, error: selErr } = await supabaseAdmin
     .from("profiles")
     .select("id")
     .eq("id", user.id)
@@ -53,7 +54,7 @@ async function ensureProfile(user) {
   if (selErr) throw selErr;
 
   if (!existing) {
-    const { error: insErr } = await supabase.from("profiles").insert([
+    const { error: insErr } = await supabaseAdmin.from("profiles").insert([
       {
         id: user.id,
         full_name: user.user_metadata?.full_name ?? null,
@@ -89,8 +90,11 @@ app.get("/routes", (req, res) => {
       "/profile",
       "/pets",
       "/appointments",
+      "/appointments/:id",
+      "/appointments/:id/cancel",
       "/pets/:petId/visits",
       "/pets/:petId/treatments",
+      "/admin/stats",
       "/admin/appointments",
       "/admin/appointments/:id",
     ],
@@ -144,6 +148,67 @@ app.post("/auth/login", async (req, res) => {
     return res.status(500).json({ message: String(e) });
   }
 });
+
+// ADMIN STATS (simulado con password del usuario)
+// Devuelve totales globales: usuarios, mascotas, citas
+app.post("/admin/stats", requireAuth, async (req, res) => {
+  try {
+    const { password } = req.body ?? {};
+    if (!password) return res.status(400).json({ message: "password es requerido" });
+
+    const email = req.user?.email;
+    if (!email) return res.status(400).json({ message: "Tu usuario no tiene email" });
+
+    // ✅ Verificar que la contraseña ingresada sea correcta
+    // (re-login usando anon key)
+    const { data: loginData, error: loginErr } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
+
+    if (loginErr || !loginData?.session) {
+      return res.status(401).json({ message: "Contraseña incorrecta" });
+    }
+
+    // ✅ Totales globales (service role)
+    // Usuarios (Auth)
+    const { data: usersData, error: usersErr } = await supabaseAdmin.auth.admin.listUsers({
+      perPage: 1, // no importa, el total viene en `total` (cuando está disponible)
+      page: 1,
+    });
+    if (usersErr) return res.status(400).json({ message: usersErr.message });
+
+    // Si `total` no existiera, fallback a length (menos exacto)
+    const usersTotal =
+      typeof usersData?.total === "number" ? usersData.total : (usersData?.users?.length ?? 0);
+
+    // Mascotas (tabla pets)
+    const { count: petsTotal, error: petsErr } = await supabaseAdmin
+      .from("pets")
+      .select("id", { count: "exact", head: true });
+
+    if (petsErr) return res.status(400).json({ message: petsErr.message });
+
+    // Citas (tabla appointments)
+    const { count: appointmentsTotal, error: apErr } = await supabaseAdmin
+      .from("appointments")
+      .select("id", { count: "exact", head: true });
+
+    if (apErr) return res.status(400).json({ message: apErr.message });
+
+    return res.json({
+      ok: true,
+      stats: {
+        users: usersTotal,
+        pets: petsTotal ?? 0,
+        appointments: appointmentsTotal ?? 0,
+      },
+    });
+  } catch (e) {
+    return res.status(500).json({ message: String(e) });
+  }
+});
+
 
 // PROFILE
 app.get("/profile", requireAuth, async (req, res) => {
@@ -268,7 +333,9 @@ app.post("/appointments", requireAuth, async (req, res) => {
     const { pet_id, scheduled_at, reason } = req.body ?? {};
 
     if (!scheduled_at) {
-      return res.status(400).json({ message: "scheduled_at es requerido (ISO)" });
+      return res
+        .status(400)
+        .json({ message: "scheduled_at es requerido (ISO)" });
     }
 
     const { data, error } = await supabase
@@ -292,17 +359,35 @@ app.post("/appointments", requireAuth, async (req, res) => {
     return res.status(500).json({ message: String(e) });
   }
 });
-// Cancelar cita (status = cancelled)
-app.patch("/appointments/:id/cancel", requireAuth, async (req, res) => {
+
+// Editar cita (motivo/fecha/mascota) - SOLO dueño
+app.put("/appointments/:id", requireAuth, async (req, res) => {
   try {
+    await ensureProfile(req.user);
+
     const ownerId = req.user.id;
     const id = req.params.id;
 
+    const { pet_id, scheduled_at, reason } = req.body ?? {};
+
+    // Validaciones básicas
+    if (scheduled_at && typeof scheduled_at !== "string") {
+      return res.status(400).json({ message: "scheduled_at debe ser string ISO" });
+    }
+    if (reason && typeof reason !== "string") {
+      return res.status(400).json({ message: "reason debe ser string" });
+    }
+
+    // Solo edita su propia cita
     const { data, error } = await supabase
       .from("appointments")
-      .update({ status: "cancelled" })
+      .update({
+        pet_id: pet_id ?? null,
+        scheduled_at: scheduled_at ?? undefined, // si no viene, no lo cambia
+        reason: reason ?? undefined,             // si no viene, no lo cambia
+      })
       .eq("id", id)
-      .eq("owner_id", ownerId) // seguridad: solo la suya
+      .eq("owner_id", ownerId)
       .select()
       .single();
 
@@ -314,6 +399,29 @@ app.patch("/appointments/:id/cancel", requireAuth, async (req, res) => {
     return res.status(500).json({ message: String(e) });
   }
 });
+// ✅ Cancelar cita (status = cancelled)
+app.patch("/appointments/:id/cancel", requireAuth, async (req, res) => {
+  try {
+    const ownerId = req.user.id;
+    const id = req.params.id;
+
+    const { data, error } = await supabase
+      .from("appointments")
+      .update({ status: "cancelled" })
+      .eq("id", id)
+      .eq("owner_id", ownerId)
+      .select()
+      .single();
+
+    if (error) return res.status(400).json({ message: error.message });
+    if (!data) return res.status(404).json({ message: "Cita no encontrada" });
+
+    return res.json({ ok: true, appointment: data });
+  } catch (e) {
+    return res.status(500).json({ message: String(e) });
+  }
+});
+
 // VISITS
 app.get("/pets/:petId/visits", requireAuth, async (req, res) => {
   try {
